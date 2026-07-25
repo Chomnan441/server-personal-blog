@@ -3,14 +3,13 @@ import "dotenv/config";
 
 const { Pool } = pg;
 
-// Pool = กลุ่มการเชื่อมต่อกับ PostgreSQL
-// ใช้ค่าจากไฟล์ .env เพื่อไม่ต้องใส่รหัสผ่านในโค้ด
+// เชื่อมต่อ Supabase PostgreSQL ผ่าน CONNECTION_STRING จากไฟล์ .env
 const pool = new Pool({
-  host: process.env.PGHOST,
-  port: Number(process.env.PGPORT),
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  database: process.env.PGDATABASE,
+  connectionString: process.env.CONNECTION_STRING,
+  // Supabase บังคับใช้ SSL ตอนเชื่อมต่อจากภายนอก
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
 export default pool;
