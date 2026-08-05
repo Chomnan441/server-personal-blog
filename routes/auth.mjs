@@ -29,14 +29,29 @@ authRouter.post("/register", async (req, res) => {
     });
 
     if (error) {
-      if (error.code === "user_already_exists") {
+      console.error("Supabase signUp error:", error.code, error.message);
+
+      if (
+        error.code === "user_already_exists" ||
+        error.message?.toLowerCase().includes("already registered") ||
+        error.message?.toLowerCase().includes("already been registered")
+      ) {
         return res
           .status(400)
           .json({ error: "User with this email already exists" });
       }
+
+      // ส่งข้อความจาก Supabase ตรงๆ ให้ FE แสดงได้ (เช่น รหัสสั้นเกินไป)
       return res.status(400).json({
-        error: "Failed to create user",
-        message: error.message,
+        error: error.message || "Failed to create user",
+      });
+    }
+
+    // บางโปรเจกต์เปิด Confirm email → data.user อาจมี แต่ยัง login ไม่ได้
+    if (!data?.user?.id) {
+      return res.status(400).json({
+        error:
+          "Sign up almost succeeded, but no user was returned. Check Supabase Auth email confirmation settings.",
       });
     }
 
@@ -155,6 +170,7 @@ authRouter.put("/reset-password", async (req, res) => {
       return res.status(401).json({ error: "Unauthorized or token expired" });
     }
 
+    // ยืนยันรหัสเก่าด้วยการ login อีกรอบ
     const { error: loginError } = await supabase.auth.signInWithPassword({
       email: data.user.email,
       password: oldPassword,
@@ -164,7 +180,18 @@ authRouter.put("/reset-password", async (req, res) => {
       return res.status(400).json({ error: "Invalid old password" });
     }
 
-    const { error: updateError } = await supabase.auth.updateUser({
+    // อัปเดตรหัสด้วย client ที่ผูก token ของ user คนนี้
+    const userClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY,
+      {
+        global: {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      },
+    );
+
+    const { error: updateError } = await userClient.auth.updateUser({
       password: newPassword,
     });
 
@@ -175,6 +202,82 @@ authRouter.put("/reset-password", async (req, res) => {
     return res.status(200).json({ message: "Password updated successfully" });
   } catch (error) {
     console.error("Reset password error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PUT /auth/profile — แก้ชื่อ / username / รูปโปรไฟล์ (ต้องมี token)
+authRouter.put("/profile", async (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  const { name, username, profilePic } = req.body;
+
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized: Token missing" });
+  }
+
+  const trimmedName = typeof name === "string" ? name.trim() : "";
+  const trimmedUsername = typeof username === "string" ? username.trim() : "";
+
+  if (!trimmedName) {
+    return res.status(400).json({ error: "Name is required" });
+  }
+
+  if (!trimmedUsername) {
+    return res.status(400).json({ error: "Username is required" });
+  }
+
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data.user) {
+      return res.status(401).json({ error: "Unauthorized or token expired" });
+    }
+
+    const userId = data.user.id;
+
+    const taken = await connectionPool.query(
+      `SELECT id FROM users WHERE username = $1 AND id <> $2`,
+      [trimmedUsername, userId],
+    );
+
+    if (taken.rows.length > 0) {
+      return res.status(400).json({ error: "This username is already taken" });
+    }
+
+    const nextProfilePic =
+      typeof profilePic === "string" && profilePic.trim()
+        ? profilePic.trim()
+        : null;
+
+    const result = await connectionPool.query(
+      `UPDATE users
+       SET name = $1,
+           username = $2,
+           profile_pic = $3
+       WHERE id = $4
+       RETURNING *`,
+      [trimmedName, trimmedUsername, nextProfilePic, userId],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User profile not found" });
+    }
+
+    const user = result.rows[0];
+
+    return res.status(200).json({
+      message: "Profile updated successfully",
+      user: {
+        id: data.user.id,
+        email: data.user.email,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+        profilePic: user.profile_pic,
+      },
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

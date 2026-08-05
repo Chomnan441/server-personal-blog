@@ -3,6 +3,8 @@ import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import pool from "../utils/db.mjs";
 import protectAdmin from "../middlewares/protectAdmin.mjs";
+import protectUser from "../middlewares/protectUser.mjs";
+import { notifyAdmins } from "../utils/notifications.mjs";
 
 const postsRouter = Router();
 
@@ -15,13 +17,15 @@ const multerStorage = multer.memoryStorage();
 const upload = multer({ storage: multerStorage });
 const imageFileUpload = upload.fields([{ name: "imageFile", maxCount: 1 }]);
 
-// ตรวจ body ของ POST/PUT ตามโจทย์ validation
-// คืน { ok: true } หรือ { ok: false, message: "..." } แล้ว route จะตอบ 400
-// requireImage=false เมื่ออัปโหลดไฟล์แล้วได้ URL จาก Storage แทน
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// ตรวจ body ของ POST/PUT
+// category_id ตรวจแค่มีค่า — จะ resolve เป็น id จริงจาก DB ทีหลัง (รองรับ uuid / ชื่อหมวด)
 function validatePostBody(body = {}, { requireImage = true } = {}) {
   const fields = [
     { key: "title", label: "Title", type: "string" },
-    { key: "category_id", label: "Category_id", type: "number" },
+    { key: "category_id", label: "Category_id", type: "string" },
     { key: "description", label: "Description", type: "string" },
     { key: "content", label: "Content", type: "string" },
     { key: "status_id", label: "Status_id", type: "number" },
@@ -34,7 +38,6 @@ function validatePostBody(body = {}, { requireImage = true } = {}) {
   for (const field of fields) {
     const value = body[field.key];
 
-    // ขาดค่า / null / string ว่าง → required
     if (
       value === undefined ||
       value === null ||
@@ -43,7 +46,6 @@ function validatePostBody(body = {}, { requireImage = true } = {}) {
       return { ok: false, message: `${field.label} is required` };
     }
 
-    // ชนิดข้อมูลไม่ตรง
     if (typeof value !== field.type) {
       return {
         ok: false,
@@ -55,19 +57,113 @@ function validatePostBody(body = {}, { requireImage = true } = {}) {
   return { ok: true };
 }
 
-// FormData ส่งตัวเลขมาเป็น string — แปลงก่อน validate/insert
+/**
+ * แปลงค่า category จาก FE ให้เป็น id จริงในตาราง categories
+ * รับได้ทั้ง uuid, ชื่อหมวด ("General"), หรือเลข id แบบเก่า
+ */
+async function resolveCategoryId(raw) {
+  if (raw === undefined || raw === null) {
+    return { ok: false, message: "Category_id is required" };
+  }
+
+  const value = String(raw).trim();
+  if (!value) {
+    return { ok: false, message: "Category_id is required" };
+  }
+
+  if (UUID_RE.test(value)) {
+    const result = await pool.query(`SELECT id FROM categories WHERE id = $1`, [
+      value,
+    ]);
+    if (result.rows.length === 0) {
+      return { ok: false, message: "Category not found" };
+    }
+    return { ok: true, id: result.rows[0].id };
+  }
+
+  const byName = await pool.query(
+    `SELECT id FROM categories WHERE name ILIKE $1 LIMIT 1`,
+    [value],
+  );
+  if (byName.rows.length > 0) {
+    return { ok: true, id: byName.rows[0].id };
+  }
+
+  if (/^\d+$/.test(value)) {
+    const byNumeric = await pool.query(
+      `SELECT id FROM categories WHERE id::text = $1 LIMIT 1`,
+      [value],
+    );
+    if (byNumeric.rows.length > 0) {
+      return { ok: true, id: byNumeric.rows[0].id };
+    }
+  }
+
+  return {
+    ok: false,
+    message: `Category not found: "${value}"`,
+  };
+}
+
+// FormData ส่งทุกอย่างมาเป็น string — แปลงชนิดให้ถูกก่อน validate/insert
 function parseMultipartPostBody(body = {}) {
   return {
     title: body.title,
     description: body.description,
     content: body.content,
-    category_id: Number(body.category_id),
+    image: body.image,
+    category_id:
+      typeof body.category_id === "string"
+        ? body.category_id.trim()
+        : body.category_id,
     status_id: Number(body.status_id),
   };
 }
 
+async function uploadImageToStorage(file) {
+  const bucketName = "personal-blog";
+  const filePath = `posts/${Date.now()}_${file.originalname}`;
+
+  const { data: uploadData, error: uploadError } = await supabase.storage
+    .from(bucketName)
+    .upload(filePath, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (uploadError) {
+    return { ok: false, error: uploadError };
+  }
+
+  const {
+    data: { publicUrl },
+  } = supabase.storage.from(bucketName).getPublicUrl(uploadData.path);
+
+  return { ok: true, publicUrl };
+}
+
+// GET /posts/lookups — รายการ categories + statuses จาก DB (ใช้ map ชื่อ ↔ id)
+// ต้องอยู่ก่อน /:postId ไม่งั้น Express จะคิดว่า "lookups" เป็น postId
+postsRouter.get("/lookups", async (_req, res) => {
+  try {
+    const [categoriesResult, statusesResult] = await Promise.all([
+      pool.query(`SELECT id, name FROM categories ORDER BY name ASC`),
+      pool.query(`SELECT id, status FROM statuses ORDER BY id ASC`),
+    ]);
+
+    return res.status(200).json({
+      categories: categoriesResult.rows,
+      statuses: statusesResult.rows,
+    });
+  } catch (error) {
+    console.error("Error fetching lookups:", error.message);
+    return res.status(500).json({
+      message: "Server could not read lookups because database connection",
+    });
+  }
+});
+
 // GET /posts
-// ตาม API Document: ดูบทความทั้งหมด + แบ่งหน้า / กรองหมวด / ค้นหาคำ
 postsRouter.get("/", async (req, res) => {
   try {
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -114,18 +210,20 @@ postsRouter.get("/", async (req, res) => {
       `SELECT
          posts.id,
          posts.image,
+         posts.category_id,
          categories.name AS category,
          posts.title,
          posts.description,
          posts.date,
          posts.content,
+         posts.status_id,
          statuses.status,
          posts.likes_count
        FROM posts
        LEFT JOIN categories ON posts.category_id = categories.id
        LEFT JOIN statuses ON posts.status_id = statuses.id
        ${whereClause}
-       ORDER BY posts.id ASC
+       ORDER BY posts.date DESC NULLS LAST, posts.id DESC
        LIMIT $${limitPlaceholder} OFFSET $${offsetPlaceholder}`,
       dataValues,
     );
@@ -157,11 +255,13 @@ postsRouter.get("/:postId", async (req, res) => {
       `SELECT
          posts.id,
          posts.image,
+         posts.category_id,
          categories.name AS category,
          posts.title,
          posts.description,
          posts.date,
          posts.content,
+         posts.status_id,
          statuses.status,
          posts.likes_count
        FROM posts
@@ -186,17 +286,246 @@ postsRouter.get("/:postId", async (req, res) => {
   }
 });
 
-// PUT /posts/:postId
-postsRouter.put("/:postId", async (req, res) => {
+// GET /posts/:postId/comments — ต้องอยู่ก่อน /:postId ถ้ามีโอกาสชน
+// (path คนละแบบกับ /:postId อยู่แล้ว แต่จัดไว้ชัดเจน)
+postsRouter.get("/:postId/comments", async (req, res) => {
   try {
-    const validation = validatePostBody(req.body);
+    const { postId } = req.params;
+
+    const postExists = await pool.query(`SELECT id FROM posts WHERE id = $1`, [
+      postId,
+    ]);
+
+    if (postExists.rows.length === 0) {
+      return res.status(404).json({
+        message: "Server could not find a requested post",
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         comments.id,
+         comments.comment_text,
+         comments.created_at,
+         users.name,
+         users.profile_pic AS image
+       FROM comments
+       LEFT JOIN users ON comments.user_id = users.id
+       WHERE comments.post_id = $1
+       ORDER BY comments.created_at DESC`,
+      [postId],
+    );
+
+    // FE คาดหวังเป็น array ตรงๆ
+    return res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching comments:", error.message);
+    return res.status(500).json({
+      message: "Server could not read comments because database connection",
+    });
+  }
+});
+
+// POST /posts/:postId/comments — โพสต์คอมเมนต์ (ต้องล็อกอิน)
+postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const commentText =
+      typeof req.body?.comment_text === "string"
+        ? req.body.comment_text.trim()
+        : "";
+
+    if (!commentText) {
+      return res.status(400).json({ message: "Comment text is required" });
+    }
+
+    const postExists = await pool.query(`SELECT id FROM posts WHERE id = $1`, [
+      postId,
+    ]);
+
+    if (postExists.rows.length === 0) {
+      return res.status(404).json({
+        message: "Server could not find a requested post",
+      });
+    }
+
+    const userId = req.user.id;
+
+    // ต้องมีแถวในตาราง users (สมัครผ่าน /auth/register แล้ว)
+    const userExists = await pool.query(
+      `SELECT id, name, profile_pic FROM users WHERE id = $1`,
+      [userId],
+    );
+
+    if (userExists.rows.length === 0) {
+      return res.status(404).json({
+        message: "User profile not found. Please complete registration.",
+      });
+    }
+
+    const insertResult = await pool.query(
+      `INSERT INTO comments (post_id, user_id, comment_text)
+       VALUES ($1, $2, $3)
+       RETURNING id, comment_text, created_at`,
+      [postId, userId, commentText],
+    );
+
+    const row = insertResult.rows[0];
+    const profile = userExists.rows[0];
+
+    // แจ้งเตือน admin ว่ามีคอมเมนต์ใหม่
+    try {
+      await notifyAdmins({
+        actorId: userId,
+        type: "comment",
+        postId: Number(postId),
+        commentId: row.id,
+        message: commentText,
+      });
+    } catch (notifyError) {
+      console.error("notifyAdmins (comment) error:", notifyError.message);
+    }
+
+    return res.status(201).json({
+      id: row.id,
+      comment_text: row.comment_text,
+      created_at: row.created_at,
+      name: profile.name,
+      image: profile.profile_pic,
+    });
+  } catch (error) {
+    console.error("Error creating comment:", error.message);
+    return res.status(500).json({
+      message: "Server could not create comment",
+      error: error.message,
+    });
+  }
+});
+
+// POST /posts/:postId/likes — กดไลค์ / ยกเลิกไลค์ (ต้องล็อกอิน)
+postsRouter.post("/:postId/likes", protectUser, async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const userId = req.user.id;
+
+    const postExists = await pool.query(
+      `SELECT id, likes_count FROM posts WHERE id = $1`,
+      [postId],
+    );
+
+    if (postExists.rows.length === 0) {
+      return res.status(404).json({
+        message: "Server could not find a requested post",
+      });
+    }
+
+    const existing = await pool.query(
+      `SELECT id FROM likes WHERE post_id = $1 AND user_id = $2`,
+      [postId, userId],
+    );
+
+    let liked;
+    let likesCount = Number(postExists.rows[0].likes_count) || 0;
+
+    if (existing.rows.length > 0) {
+      // ยกเลิกไลค์
+      await pool.query(`DELETE FROM likes WHERE id = $1`, [
+        existing.rows[0].id,
+      ]);
+      likesCount = Math.max(0, likesCount - 1);
+      liked = false;
+    } else {
+      await pool.query(
+        `INSERT INTO likes (post_id, user_id, liked_at)
+         VALUES ($1, $2, NOW())`,
+        [postId, userId],
+      );
+      likesCount += 1;
+      liked = true;
+
+      try {
+        await notifyAdmins({
+          actorId: userId,
+          type: "like",
+          postId: Number(postId),
+          message: "liked your article",
+        });
+      } catch (notifyError) {
+        console.error("notifyAdmins (like) error:", notifyError.message);
+      }
+    }
+
+    await pool.query(`UPDATE posts SET likes_count = $1 WHERE id = $2`, [
+      likesCount,
+      postId,
+    ]);
+
+    return res.status(200).json({
+      liked,
+      likes_count: likesCount,
+    });
+  } catch (error) {
+    console.error("Error toggling like:", error.message);
+    return res.status(500).json({
+      message: "Server could not update like",
+      error: error.message,
+    });
+  }
+});
+
+async function updatePost(req, res) {
+  try {
+    const { postId } = req.params;
+    const file = req.files?.imageFile?.[0];
+
+    // รองรับทั้ง JSON และ multipart (ตอนเปลี่ยนรูป)
+    const body =
+      file || req.is("multipart/form-data")
+        ? parseMultipartPostBody(req.body)
+        : {
+            title: req.body.title,
+            description: req.body.description,
+            content: req.body.content,
+            image: req.body.image,
+            category_id:
+              typeof req.body.category_id === "string"
+                ? req.body.category_id.trim()
+                : req.body.category_id,
+            status_id: Number(req.body.status_id),
+          };
+
+    let imageUrl = body.image;
+
+    if (file) {
+      const uploaded = await uploadImageToStorage(file);
+      if (!uploaded.ok) {
+        console.error("Supabase upload error:", uploaded.error.message);
+        return res.status(500).json({
+          message: "Failed to upload image to storage",
+          error: uploaded.error.message,
+        });
+      }
+      imageUrl = uploaded.publicUrl;
+    }
+
+    const payload = {
+      title: body.title,
+      image: imageUrl,
+      category_id: body.category_id,
+      description: body.description,
+      content: body.content,
+      status_id: body.status_id,
+    };
+
+    const validation = validatePostBody(payload, { requireImage: true });
     if (!validation.ok) {
       return res.status(400).json({ message: validation.message });
     }
 
-    const { postId } = req.params;
-    const { title, image, category_id, description, content, status_id } =
-      req.body;
+    const resolvedCategory = await resolveCategoryId(payload.category_id);
+    if (!resolvedCategory.ok) {
+      return res.status(400).json({ message: resolvedCategory.message });
+    }
 
     const result = await pool.query(
       `UPDATE posts
@@ -208,7 +537,15 @@ postsRouter.put("/:postId", async (req, res) => {
            status_id = $6
        WHERE id = $7
        RETURNING id`,
-      [title, image, category_id, description, content, status_id, postId],
+      [
+        payload.title,
+        payload.image,
+        resolvedCategory.id,
+        payload.description,
+        payload.content,
+        payload.status_id,
+        postId,
+      ],
     );
 
     if (result.rows.length === 0) {
@@ -219,6 +556,7 @@ postsRouter.put("/:postId", async (req, res) => {
 
     return res.status(200).json({
       message: "Updated post successfully",
+      image: imageUrl,
     });
   } catch (error) {
     console.error("Error updating post:", error.message);
@@ -226,10 +564,13 @@ postsRouter.put("/:postId", async (req, res) => {
       message: "Server could not update post because database connection",
     });
   }
-});
+}
 
-// DELETE /posts/:postId
-postsRouter.delete("/:postId", async (req, res) => {
+// PUT /posts/:postId — เฉพาะ admin (มี token + role admin)
+postsRouter.put("/:postId", imageFileUpload, protectAdmin, updatePost);
+
+// DELETE /posts/:postId — เฉพาะ admin
+postsRouter.delete("/:postId", protectAdmin, async (req, res) => {
   try {
     const { postId } = req.params;
 
@@ -246,7 +587,7 @@ postsRouter.delete("/:postId", async (req, res) => {
       });
     }
 
-    return res.status(201).json({
+    return res.status(200).json({
       message: "Deleted post successfully",
     });
   } catch (error) {
@@ -270,39 +611,38 @@ async function createPostWithUpload(req, res) {
       return res.status(400).json({ message: validation.message });
     }
 
-    const bucketName = "personal-blog";
-    const filePath = `posts/${Date.now()}_${file.originalname}`;
+    const resolvedCategory = await resolveCategoryId(newPost.category_id);
+    if (!resolvedCategory.ok) {
+      return res.status(400).json({ message: resolvedCategory.message });
+    }
 
-    const { data: uploadData, error: uploadError } = await supabase.storage
-      .from(bucketName)
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false,
-      });
-
-    if (uploadError) {
-      console.error("Supabase upload error:", uploadError.message);
+    const uploaded = await uploadImageToStorage(file);
+    if (!uploaded.ok) {
+      console.error("Supabase upload error:", uploaded.error.message);
       return res.status(500).json({
         message: "Failed to upload image to storage",
-        error: uploadError.message,
+        error: uploaded.error.message,
       });
     }
 
-    const {
-      data: { publicUrl },
-    } = supabase.storage.from(bucketName).getPublicUrl(uploadData.path);
-
-    const { title, category_id, description, content, status_id } = newPost;
+    const { title, description, content, status_id } = newPost;
 
     await pool.query(
       `INSERT INTO posts (title, image, category_id, description, content, status_id, date, likes_count)
        VALUES ($1, $2, $3, $4, $5, $6, NOW(), 0)`,
-      [title, publicUrl, category_id, description, content, status_id],
+      [
+        title,
+        uploaded.publicUrl,
+        resolvedCategory.id,
+        description,
+        content,
+        status_id,
+      ],
     );
 
     return res.status(201).json({
       message: "Created post successfully",
-      image: publicUrl,
+      image: uploaded.publicUrl,
     });
   } catch (error) {
     console.error("Error creating post:", error.message);

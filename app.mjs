@@ -3,8 +3,11 @@ import express from "express";
 import cors from "cors";
 import postsRouter from "./routes/posts.mjs";
 import authRouter from "./routes/auth.mjs";
+import categoriesRouter from "./routes/categories.mjs";
+import notificationsRouter from "./routes/notifications.mjs";
 import protectUser from "./middlewares/protectUser.mjs";
 import protectAdmin from "./middlewares/protectAdmin.mjs";
+import { ensureNotificationsTable } from "./utils/notifications.mjs";
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -34,6 +37,12 @@ app.use("/posts", postsRouter);
 // เช่น POST /register ใน router = POST /auth/register
 app.use("/auth", authRouter);
 
+// ติดตั้ง categories router ที่ path /categories
+app.use("/categories", categoriesRouter);
+
+// ติดตั้ง notifications router ที่ path /notifications
+app.use("/notifications", notificationsRouter);
+
 // route ทดสอบ — ผู้ใช้ที่ล็อกอินแล้วเท่านั้น
 app.get("/protected-route", protectUser, (req, res) => {
   res.status(200).json({
@@ -50,6 +59,12 @@ app.get("/admin-only", protectAdmin, (req, res) => {
   });
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
+  try {
+    await ensureNotificationsTable();
+    console.log("Notifications table is ready");
+  } catch (error) {
+    console.error("Could not ensure notifications table:", error.message);
+  }
   console.log(`Server is running at http://localhost:${port}`);
 });
