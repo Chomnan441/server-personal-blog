@@ -5,9 +5,11 @@ import postsRouter from "./routes/posts.mjs";
 import authRouter from "./routes/auth.mjs";
 import categoriesRouter from "./routes/categories.mjs";
 import notificationsRouter from "./routes/notifications.mjs";
+import siteSettingsRouter from "./routes/siteSettings.mjs";
 import protectUser from "./middlewares/protectUser.mjs";
 import protectAdmin from "./middlewares/protectAdmin.mjs";
 import { ensureNotificationsTable } from "./utils/notifications.mjs";
+import { ensureSiteSettingsTable } from "./utils/siteSettings.mjs";
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -43,6 +45,9 @@ app.use("/categories", categoriesRouter);
 // ติดตั้ง notifications router ที่ path /notifications
 app.use("/notifications", notificationsRouter);
 
+// ตั้งค่าเว็บ (รูป Hero ฯลฯ)
+app.use("/site-settings", siteSettingsRouter);
+
 // route ทดสอบ — ผู้ใช้ที่ล็อกอินแล้วเท่านั้น
 app.get("/protected-route", protectUser, (req, res) => {
   res.status(200).json({
@@ -66,5 +71,13 @@ app.listen(port, async () => {
   } catch (error) {
     console.error("Could not ensure notifications table:", error.message);
   }
+
+  try {
+    await ensureSiteSettingsTable();
+    console.log("Site settings table is ready");
+  } catch (error) {
+    console.error("Could not ensure site_settings table:", error.message);
+  }
+
   console.log(`Server is running at http://localhost:${port}`);
 });

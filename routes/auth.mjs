@@ -108,6 +108,34 @@ authRouter.post("/login", async (req, res) => {
   }
 });
 
+// GET /auth/site-author — โปรไฟล์สาธารณะของแอดมินคนแรก (หน้า Hero)
+authRouter.get("/site-author", async (_req, res) => {
+  try {
+    const result = await connectionPool.query(
+      `SELECT name, bio, profile_pic
+       FROM users
+       WHERE role = 'admin'
+       ORDER BY username ASC
+       LIMIT 1`,
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Site author not found" });
+    }
+
+    const author = result.rows[0];
+
+    return res.status(200).json({
+      name: author.name || "",
+      bio: author.bio || "",
+      profilePic: author.profile_pic || "",
+    });
+  } catch (error) {
+    console.error("Site author error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // GET /auth/get-user — ดึงข้อมูลผู้ใช้ปัจจุบันจาก token + ตาราง users
 authRouter.get("/get-user", async (req, res) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -141,6 +169,7 @@ authRouter.get("/get-user", async (req, res) => {
       name: user.name,
       role: user.role,
       profilePic: user.profile_pic,
+      bio: user.bio || "",
     });
   } catch (error) {
     console.error("Get user error:", error);
@@ -206,10 +235,10 @@ authRouter.put("/reset-password", async (req, res) => {
   }
 });
 
-// PUT /auth/profile — แก้ชื่อ / username / รูปโปรไฟล์ (ต้องมี token)
+// PUT /auth/profile — แก้ชื่อ / username / รูปโปรไฟล์ / bio (ต้องมี token)
 authRouter.put("/profile", async (req, res) => {
   const token = req.headers.authorization?.split(" ")[1];
-  const { name, username, profilePic } = req.body;
+  const { name, username, profilePic, bio } = req.body;
 
   if (!token) {
     return res.status(401).json({ error: "Unauthorized: Token missing" });
@@ -217,6 +246,7 @@ authRouter.put("/profile", async (req, res) => {
 
   const trimmedName = typeof name === "string" ? name.trim() : "";
   const trimmedUsername = typeof username === "string" ? username.trim() : "";
+  const trimmedBio = typeof bio === "string" ? bio.trim() : "";
 
   if (!trimmedName) {
     return res.status(400).json({ error: "Name is required" });
@@ -224,6 +254,10 @@ authRouter.put("/profile", async (req, res) => {
 
   if (!trimmedUsername) {
     return res.status(400).json({ error: "Username is required" });
+  }
+
+  if (trimmedBio.length > 120) {
+    return res.status(400).json({ error: "Bio must be at most 120 characters" });
   }
 
   try {
@@ -253,10 +287,11 @@ authRouter.put("/profile", async (req, res) => {
       `UPDATE users
        SET name = $1,
            username = $2,
-           profile_pic = $3
-       WHERE id = $4
+           profile_pic = $3,
+           bio = $4
+       WHERE id = $5
        RETURNING *`,
-      [trimmedName, trimmedUsername, nextProfilePic, userId],
+      [trimmedName, trimmedUsername, nextProfilePic, trimmedBio, userId],
     );
 
     if (result.rows.length === 0) {
@@ -274,6 +309,7 @@ authRouter.put("/profile", async (req, res) => {
         name: user.name,
         role: user.role,
         profilePic: user.profile_pic,
+        bio: user.bio || "",
       },
     });
   } catch (error) {

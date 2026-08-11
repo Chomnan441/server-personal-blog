@@ -8,9 +8,11 @@ import { notifyAdmins } from "../utils/notifications.mjs";
 
 const postsRouter = Router();
 
-const supabase = createClient(
+// ใช้ service role สำหรับ Storage (อัปโหลด/ลบ) เพื่อไม่ติด RLS policy ของ anon
+// ถ้ายังไม่มี SERVICE_ROLE_KEY จะ fallback เป็น ANON_KEY ชั่วคราว
+const supabaseStorage = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY,
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY,
 );
 
 const multerStorage = multer.memoryStorage();
@@ -120,12 +122,13 @@ function parseMultipartPostBody(body = {}) {
   };
 }
 
+const STORAGE_BUCKET = "personal-blog";
+
 async function uploadImageToStorage(file) {
-  const bucketName = "personal-blog";
   const filePath = `posts/${Date.now()}_${file.originalname}`;
 
-  const { data: uploadData, error: uploadError } = await supabase.storage
-    .from(bucketName)
+  const { data: uploadData, error: uploadError } = await supabaseStorage.storage
+    .from(STORAGE_BUCKET)
     .upload(filePath, file.buffer, {
       contentType: file.mimetype,
       upsert: false,
@@ -137,9 +140,73 @@ async function uploadImageToStorage(file) {
 
   const {
     data: { publicUrl },
-  } = supabase.storage.from(bucketName).getPublicUrl(uploadData.path);
+  } = supabaseStorage.storage
+    .from(STORAGE_BUCKET)
+    .getPublicUrl(uploadData.path);
 
   return { ok: true, publicUrl };
+}
+
+/**
+ * แปลง public URL ของ Supabase Storage → path ใน bucket
+ * ตัวอย่าง:
+ *   https://xxx.supabase.co/storage/v1/object/public/personal-blog/posts/123_a.jpg
+ *   → posts/123_a.jpg
+ * คืน null ถ้าไม่ใช่ URL ของ bucket นี้ (เช่น Unsplash)
+ */
+function getStoragePathFromPublicUrl(publicUrl) {
+  if (!publicUrl || typeof publicUrl !== "string") {
+    return null;
+  }
+
+  const marker = `/object/public/${STORAGE_BUCKET}/`;
+  const index = publicUrl.indexOf(marker);
+  if (index === -1) {
+    return null;
+  }
+
+  const rawPath = publicUrl.slice(index + marker.length).split("?")[0];
+  if (!rawPath) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(rawPath);
+  } catch {
+    return rawPath;
+  }
+}
+
+/**
+ * ลบไฟล์จาก Storage แบบ best-effort
+ * ลบพลาด → log อย่างเดียว ไม่ทำให้ลบ/แก้โพสต์ล้ม
+ */
+async function deleteImageFromStorage(publicUrl) {
+  const path = getStoragePathFromPublicUrl(publicUrl);
+  if (!path) {
+    console.warn(
+      "Skip storage delete (not our bucket URL):",
+      publicUrl?.slice?.(0, 80),
+    );
+    return;
+  }
+
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn(
+      "SUPABASE_SERVICE_ROLE_KEY is missing — storage delete may fail due to policies",
+    );
+  }
+
+  const { data, error } = await supabaseStorage.storage
+    .from(STORAGE_BUCKET)
+    .remove([path]);
+
+  if (error) {
+    console.error("Failed to delete image from storage:", path, error.message);
+    return;
+  }
+
+  console.log("Deleted image from storage:", path, data);
 }
 
 // GET /posts/lookups — รายการ categories + statuses จาก DB (ใช้ map ชื่อ ↔ id)
@@ -218,10 +285,15 @@ postsRouter.get("/", async (req, res) => {
          posts.content,
          posts.status_id,
          statuses.status,
-         posts.likes_count
+         posts.likes_count,
+         posts.user_id,
+         users.name AS author,
+         users.profile_pic AS author_image,
+         users.bio AS author_bio
        FROM posts
        LEFT JOIN categories ON posts.category_id = categories.id
        LEFT JOIN statuses ON posts.status_id = statuses.id
+       LEFT JOIN users ON posts.user_id = users.id
        ${whereClause}
        ORDER BY posts.date DESC NULLS LAST, posts.id DESC
        LIMIT $${limitPlaceholder} OFFSET $${offsetPlaceholder}`,
@@ -263,10 +335,15 @@ postsRouter.get("/:postId", async (req, res) => {
          posts.content,
          posts.status_id,
          statuses.status,
-         posts.likes_count
+         posts.likes_count,
+         posts.user_id,
+         users.name AS author,
+         users.profile_pic AS author_image,
+         users.bio AS author_bio
        FROM posts
        LEFT JOIN categories ON posts.category_id = categories.id
        LEFT JOIN statuses ON posts.status_id = statuses.id
+       LEFT JOIN users ON posts.user_id = users.id
        WHERE posts.id = $1`,
       [postId],
     );
@@ -494,6 +571,23 @@ async function updatePost(req, res) {
             status_id: Number(req.body.status_id),
           };
 
+    // เก็บ URL รูปเก่าไว้ — ถ้าอัปโหลดรูปใหม่จะลบไฟล์เก่าทีหลัง
+    let previousImageUrl = null;
+    // ถ้าผู้ใช้แค่แก้ข้อความเฉยๆ ไม่ได้แนบรูปใหม่มา ตัวแปร file จะไม่มีค่า บล็อก if นี้ก็จะถูกข้ามไป
+    // สรุปภาพรวม: โค้ดท่อนนี้ทำหน้าที่เป็นเหมือนนักสืบที่คอยไปเช็คประวัติก่อนว่า โพสต์ที่จะแก้ไขเนี่ย มีรูปเดิมอยู่ไหม ถ้ามีก็จดชื่อรูปเดิมเอาไว้ (เพื่อที่พอบันทึกรูปใหม่ลงระบบเสร็จแล้ว จะได้เอาชื่อรูปเก่านี้ไปสั่งลบทิ้ง ไม่ให้ไฟล์ขยะตกค้างในระบบนั่นเองครับ)
+    if (file) {
+      const existing = await pool.query(
+        `SELECT image FROM posts WHERE id = $1`,
+        [postId],
+      );
+      if (existing.rows.length === 0) {
+        return res.status(404).json({
+          message: "Server could not find a requested post to update",
+        });
+      }
+      previousImageUrl = existing.rows[0].image;
+    }
+
     let imageUrl = body.image;
 
     if (file) {
@@ -554,6 +648,11 @@ async function updatePost(req, res) {
       });
     }
 
+    // อัปเดตสำเร็จแล้ว และมีรูปใหม่คนละไฟล์ → ลบรูปเก่าใน Storage
+    if (previousImageUrl && imageUrl && previousImageUrl !== imageUrl) {
+      await deleteImageFromStorage(previousImageUrl);
+    }
+
     return res.status(200).json({
       message: "Updated post successfully",
       image: imageUrl,
@@ -574,10 +673,11 @@ postsRouter.delete("/:postId", protectAdmin, async (req, res) => {
   try {
     const { postId } = req.params;
 
+    // RETURNING image ด้วย เพื่อรู้ว่าต้องลบไฟล์ไหนใน Storage
     const result = await pool.query(
       `DELETE FROM posts
        WHERE id = $1
-       RETURNING id`,
+       RETURNING id, image`,
       [postId],
     );
 
@@ -586,6 +686,9 @@ postsRouter.delete("/:postId", protectAdmin, async (req, res) => {
         message: "Server could not find a requested post to delete",
       });
     }
+
+    const deletedImage = result.rows[0].image;
+    await deleteImageFromStorage(deletedImage);
 
     return res.status(200).json({
       message: "Deleted post successfully",
@@ -626,10 +729,11 @@ async function createPostWithUpload(req, res) {
     }
 
     const { title, description, content, status_id } = newPost;
+    const authorId = req.user.id;
 
     await pool.query(
-      `INSERT INTO posts (title, image, category_id, description, content, status_id, date, likes_count)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), 0)`,
+      `INSERT INTO posts (title, image, category_id, description, content, status_id, date, likes_count, user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), 0, $7)`,
       [
         title,
         uploaded.publicUrl,
@@ -637,6 +741,7 @@ async function createPostWithUpload(req, res) {
         description,
         content,
         status_id,
+        authorId,
       ],
     );
 
