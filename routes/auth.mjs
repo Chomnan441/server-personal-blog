@@ -7,6 +7,8 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY,
 );
 
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+
 const authRouter = Router();
 
 // POST /auth/register — สมัครสมาชิกผ่าน Supabase Auth + บันทึกโปรไฟล์ลงตาราง users
@@ -176,6 +178,84 @@ authRouter.get("/get-user", async (req, res) => {
     return res
       .status(500)
       .json({ error: "An error occurred while fetching user" });
+  }
+});
+
+// POST /auth/forgot-password — ส่งอีเมลรีเซ็ตรหัส (ไม่ต้อง login)
+authRouter.post("/forgot-password", async (req, res) => {
+  const email =
+    typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+
+  if (!email) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+
+  try {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${FRONTEND_URL}/auth/recovery`,
+    });
+
+    if (error) {
+      console.error("Forgot password error:", error.message);
+    }
+
+    // ตอบข้อความกลาง ๆ เสมอ — ไม่บอกว่ามี/ไม่มีอีเมลในระบบ
+    return res.status(200).json({
+      message:
+        "If an account exists for this email, a password reset link has been sent.",
+    });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /auth/recovery-password — ตั้งรหัสใหม่จากลิงก์ในอีเมล
+authRouter.post("/recovery-password", async (req, res) => {
+  const { accessToken, refreshToken, password } = req.body;
+
+  if (!accessToken || !refreshToken) {
+    return res.status(401).json({ error: "Recovery session is missing" });
+  }
+
+  if (!password || typeof password !== "string") {
+    return res.status(400).json({ error: "Password is required" });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({
+      error: "Password must be at least 6 characters",
+    });
+  }
+
+  try {
+    const userClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY,
+    );
+
+    // Supabase ต้อง setSession ก่อน — แค่ Bearer header ไม่พอ (Auth session missing)
+    const { error: sessionError } = await userClient.auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    });
+
+    if (sessionError) {
+      return res.status(400).json({ error: sessionError.message });
+    }
+
+    const { error: updateError } = await userClient.auth.updateUser({
+      password,
+    });
+
+    if (updateError) {
+      return res.status(400).json({ error: updateError.message });
+    }
+
+    return res.status(200).json({ message: "Password updated successfully" });
+  } catch (error) {
+    console.error("Recovery password error:", error);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
