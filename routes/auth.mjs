@@ -1,6 +1,11 @@
 import { Router } from "express";
+import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import connectionPool from "../utils/db.mjs";
+import {
+  deleteImageFromStorage,
+  uploadImageToStorage,
+} from "../utils/storage.mjs";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -10,6 +15,10 @@ const supabase = createClient(
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const authRouter = Router();
+const upload = multer({ storage: multer.memoryStorage() });
+const profilePicUpload = upload.fields([
+  { name: "profilePicFile", maxCount: 1 },
+]);
 
 // POST /auth/register — สมัครสมาชิกผ่าน Supabase Auth + บันทึกโปรไฟล์ลงตาราง users
 authRouter.post("/register", async (req, res) => {
@@ -315,10 +324,10 @@ authRouter.put("/reset-password", async (req, res) => {
   }
 });
 
-// PUT /auth/profile — แก้ชื่อ / username / รูปโปรไฟล์ / bio (ต้องมี token)
-authRouter.put("/profile", async (req, res) => {
+// PUT /auth/profile — แก้ชื่อ / username / bio + อัปโหลดรูป (multipart)
+authRouter.put("/profile", profilePicUpload, async (req, res) => {
   const token = req.headers.authorization?.split(" ")[1];
-  const { name, username, profilePic, bio } = req.body;
+  const { name, username, bio } = req.body;
 
   if (!token) {
     return res.status(401).json({ error: "Unauthorized: Token missing" });
@@ -358,10 +367,35 @@ authRouter.put("/profile", async (req, res) => {
       return res.status(400).json({ error: "This username is already taken" });
     }
 
-    const nextProfilePic =
-      typeof profilePic === "string" && profilePic.trim()
-        ? profilePic.trim()
-        : null;
+    const currentResult = await connectionPool.query(
+      `SELECT profile_pic FROM users WHERE id = $1`,
+      [userId],
+    );
+
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: "User profile not found" });
+    }
+
+    const previousProfilePic = currentResult.rows[0].profile_pic;
+    let nextProfilePic = previousProfilePic;
+
+    const profileFile = req.files?.profilePicFile?.[0];
+    if (profileFile) {
+      // ตั้งชื่อให้ path เป็น avatars/{timestamp}_{userId}.jpg
+      profileFile.originalname = `${userId}.jpg`;
+
+      const uploaded = await uploadImageToStorage(profileFile, "avatars");
+      if (!uploaded.ok) {
+        console.error("Avatar upload error:", uploaded.error.message);
+        return res.status(500).json({ error: "Failed to upload profile picture" });
+      }
+
+      if (previousProfilePic) {
+        await deleteImageFromStorage(previousProfilePic);
+      }
+
+      nextProfilePic = uploaded.publicUrl;
+    }
 
     const result = await connectionPool.query(
       `UPDATE users
@@ -373,10 +407,6 @@ authRouter.put("/profile", async (req, res) => {
        RETURNING *`,
       [trimmedName, trimmedUsername, nextProfilePic, trimmedBio, userId],
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "User profile not found" });
-    }
 
     const user = result.rows[0];
 
