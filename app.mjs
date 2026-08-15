@@ -14,7 +14,7 @@ import { ensureSiteSettingsTable } from "./utils/siteSettings.mjs";
 const app = express();
 const port = process.env.PORT || 4000;
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 // อนุญาตให้ frontend คนละ origin เรียก API ได้
 app.use(
