@@ -14,16 +14,27 @@ import { ensureSiteSettingsTable } from "./utils/siteSettings.mjs";
 const app = express();
 const port = process.env.PORT || 4000;
 
+function buildCorsOrigins() {
+  const defaults = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ];
+
+  const fromEnv = [
+    process.env.FRONTEND_URL,
+    ...(process.env.CORS_ORIGINS || "").split(","),
+  ]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean);
+
+  return [...new Set([...defaults, ...fromEnv])];
+}
+
 app.use(express.json({ limit: "1mb" }));
 
-// อนุญาตให้ frontend คนละ origin เรียก API ได้
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173", // Frontend local (Vite)
-      "http://localhost:3000", // Frontend local (React อื่นๆ)
-      "https://your-frontend.vercel.app", // แก้เป็น URL frontend จริงตอน deploy
-    ],
+    origin: buildCorsOrigins(),
   }),
 );
 
@@ -31,24 +42,12 @@ app.get("/health", (req, res) => {
   res.status(200).json({ message: "OK" });
 });
 
-// ติดตั้ง posts router ที่ path /posts
-// เช่น GET / ใน router = GET /posts ในแอปจริง
 app.use("/posts", postsRouter);
-
-// ติดตั้ง auth router ที่ path /auth
-// เช่น POST /register ใน router = POST /auth/register
 app.use("/auth", authRouter);
-
-// ติดตั้ง categories router ที่ path /categories
 app.use("/categories", categoriesRouter);
-
-// ติดตั้ง notifications router ที่ path /notifications
 app.use("/notifications", notificationsRouter);
-
-// ตั้งค่าเว็บ (รูป Hero ฯลฯ)
 app.use("/site-settings", siteSettingsRouter);
 
-// route ทดสอบ — ผู้ใช้ที่ล็อกอินแล้วเท่านั้น
 app.get("/protected-route", protectUser, (req, res) => {
   res.status(200).json({
     message: "This is protected content",
@@ -56,7 +55,6 @@ app.get("/protected-route", protectUser, (req, res) => {
   });
 });
 
-// route ทดสอบ — admin เท่านั้น
 app.get("/admin-only", protectAdmin, (req, res) => {
   res.status(200).json({
     message: "This is admin-only content",
@@ -64,7 +62,7 @@ app.get("/admin-only", protectAdmin, (req, res) => {
   });
 });
 
-app.listen(port, async () => {
+async function bootstrapTables() {
   try {
     await ensureNotificationsTable();
     console.log("Notifications table is ready");
@@ -78,6 +76,19 @@ app.listen(port, async () => {
   } catch (error) {
     console.error("Could not ensure site_settings table:", error.message);
   }
+}
 
-  console.log(`Server is running at http://localhost:${port}`);
-});
+// Vercel serverless: ต้อง export app — ห้าม app.listen
+// Local: listen ตามปกติ
+if (process.env.VERCEL) {
+  bootstrapTables().catch((error) => {
+    console.error("Bootstrap failed:", error.message);
+  });
+} else {
+  app.listen(port, async () => {
+    await bootstrapTables();
+    console.log(`Server is running at http://localhost:${port}`);
+  });
+}
+
+export default app;
