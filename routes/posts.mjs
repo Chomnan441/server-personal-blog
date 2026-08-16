@@ -15,12 +15,53 @@ const supabaseStorage = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY,
 );
 
+// anon client สำหรับตรวจ JWT บน GET สาธารณะ (ไม่บังคับ login)
+const supabaseAuth = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY,
+);
+
 const multerStorage = multer.memoryStorage();
 const upload = multer({ storage: multerStorage });
 const imageFileUpload = upload.fields([{ name: "imageFile", maxCount: 1 }]);
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Guest / user ธรรมดา → false (ไม่ 401)
+ * Admin ที่ส่ง Bearer ถูกต้อง → true
+ */
+async function isAdminViewer(req) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) {
+    return false;
+  }
+
+  try {
+    const { data, error } = await supabaseAuth.auth.getUser(token);
+    if (error || !data.user) {
+      return false;
+    }
+
+    const result = await pool.query(`SELECT role FROM users WHERE id = $1`, [
+      data.user.id,
+    ]);
+
+    return result.rows[0]?.role === "admin";
+  } catch (error) {
+    console.error("isAdminViewer error:", error.message);
+    return false;
+  }
+}
+
+/** DB เก็บ "publish" — UI/บางที่เรียก "published" */
+function isPublishedStatus(status) {
+  const normalized = String(status || "")
+    .trim()
+    .toLowerCase();
+  return normalized === "publish" || normalized === "published";
+}
 
 // ตรวจ body ของ POST/PUT
 // category_id ตรวจแค่มีค่า — จะ resolve เป็น id จริงจาก DB ทีหลัง (รองรับ uuid / ชื่อหมวด)
@@ -237,9 +278,18 @@ postsRouter.get("/", async (req, res) => {
     const limit = Math.max(1, Number.parseInt(req.query.limit, 10) || 6);
     const category = req.query.category;
     const keyword = req.query.keyword;
+    const isAdmin = await isAdminViewer(req);
 
     const conditions = [];
     const values = [];
+
+    // public / user ธรรมดาเห็นเฉพาะ publish(ed) — admin (Bearer) เห็นทุกสถานะ
+    // ตาราง statuses ใช้ค่า "publish" (ไม่ใช่ "published")
+    if (!isAdmin) {
+      conditions.push(
+        `LOWER(statuses.status) IN ('publish', 'published')`,
+      );
+    }
 
     if (category) {
       values.push(category);
@@ -261,6 +311,7 @@ postsRouter.get("/", async (req, res) => {
       `SELECT COUNT(*)::int AS total
        FROM posts
        LEFT JOIN categories ON posts.category_id = categories.id
+       LEFT JOIN statuses ON posts.status_id = statuses.id
        ${whereClause}`,
       values,
     );
@@ -354,7 +405,17 @@ postsRouter.get("/:postId", async (req, res) => {
       });
     }
 
-    return res.status(200).json(result.rows[0]);
+    const post = result.rows[0];
+    const isAdmin = await isAdminViewer(req);
+
+    // draft ซ่อนจาก public — ตอบ 404 ไม่บอกว่าเป็น draft
+    if (!isAdmin && !isPublishedStatus(post.status)) {
+      return res.status(404).json({
+        message: "Server could not find a requested post",
+      });
+    }
+
+    return res.status(200).json(post);
   } catch (error) {
     console.error("Error fetching post:", error.message);
     return res.status(500).json({
