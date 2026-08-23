@@ -4,16 +4,13 @@ import pool from "../utils/db.mjs";
 import protectAdmin from "../middlewares/protectAdmin.mjs";
 import protectUser from "../middlewares/protectUser.mjs";
 import { createPostImageUpload } from "../utils/upload.mjs";
+import {
+  deleteImageFromStorage,
+  uploadImageToStorage,
+} from "../utils/storage.mjs";
 import { notifyAdmins } from "../utils/notifications.mjs";
 
 const postsRouter = Router();
-
-// ใช้ service role สำหรับ Storage (อัปโหลด/ลบ) เพื่อไม่ติด RLS policy ของ anon
-// ถ้ายังไม่มี SERVICE_ROLE_KEY จะ fallback เป็น ANON_KEY ชั่วคราว
-const supabaseStorage = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY,
-);
 
 // anon client สำหรับตรวจ JWT บน GET สาธารณะ (ไม่บังคับ login)
 const supabaseAuth = createClient(
@@ -159,93 +156,6 @@ function parseMultipartPostBody(body = {}) {
         : body.category_id,
     status_id: Number(body.status_id),
   };
-}
-
-const STORAGE_BUCKET = "personal-blog";
-
-async function uploadImageToStorage(file) {
-  const filePath = `posts/${Date.now()}_${file.originalname}`;
-
-  const { data: uploadData, error: uploadError } = await supabaseStorage.storage
-    .from(STORAGE_BUCKET)
-    .upload(filePath, file.buffer, {
-      contentType: file.mimetype,
-      upsert: false,
-    });
-
-  if (uploadError) {
-    return { ok: false, error: uploadError };
-  }
-
-  const {
-    data: { publicUrl },
-  } = supabaseStorage.storage
-    .from(STORAGE_BUCKET)
-    .getPublicUrl(uploadData.path);
-
-  return { ok: true, publicUrl };
-}
-
-/**
- * แปลง public URL ของ Supabase Storage → path ใน bucket
- * ตัวอย่าง:
- *   https://xxx.supabase.co/storage/v1/object/public/personal-blog/posts/123_a.jpg
- *   → posts/123_a.jpg
- * คืน null ถ้าไม่ใช่ URL ของ bucket นี้ (เช่น Unsplash)
- */
-function getStoragePathFromPublicUrl(publicUrl) {
-  if (!publicUrl || typeof publicUrl !== "string") {
-    return null;
-  }
-
-  const marker = `/object/public/${STORAGE_BUCKET}/`;
-  const index = publicUrl.indexOf(marker);
-  if (index === -1) {
-    return null;
-  }
-
-  const rawPath = publicUrl.slice(index + marker.length).split("?")[0];
-  if (!rawPath) {
-    return null;
-  }
-
-  try {
-    return decodeURIComponent(rawPath);
-  } catch {
-    return rawPath;
-  }
-}
-
-/**
- * ลบไฟล์จาก Storage แบบ best-effort
- * ลบพลาด → log อย่างเดียว ไม่ทำให้ลบ/แก้โพสต์ล้ม
- */
-async function deleteImageFromStorage(publicUrl) {
-  const path = getStoragePathFromPublicUrl(publicUrl);
-  if (!path) {
-    console.warn(
-      "Skip storage delete (not our bucket URL):",
-      publicUrl?.slice?.(0, 80),
-    );
-    return;
-  }
-
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    console.warn(
-      "SUPABASE_SERVICE_ROLE_KEY is missing — storage delete may fail due to policies",
-    );
-  }
-
-  const { data, error } = await supabaseStorage.storage
-    .from(STORAGE_BUCKET)
-    .remove([path]);
-
-  if (error) {
-    console.error("Failed to delete image from storage:", path, error.message);
-    return;
-  }
-
-  console.log("Deleted image from storage:", path, data);
 }
 
 // GET /posts/lookups — รายการ categories + statuses จาก DB (ใช้ map ชื่อ ↔ id)
@@ -652,10 +562,9 @@ async function updatePost(req, res) {
     if (file) {
       const uploaded = await uploadImageToStorage(file);
       if (!uploaded.ok) {
-        console.error("Supabase upload error:", uploaded.error.message);
+        console.error("Supabase upload error:", uploaded.error?.message);
         return res.status(500).json({
           message: "Failed to upload image to storage",
-          error: uploaded.error.message,
         });
       }
       imageUrl = uploaded.publicUrl;
@@ -780,10 +689,9 @@ async function createPostWithUpload(req, res) {
 
     const uploaded = await uploadImageToStorage(file);
     if (!uploaded.ok) {
-      console.error("Supabase upload error:", uploaded.error.message);
+      console.error("Supabase upload error:", uploaded.error?.message);
       return res.status(500).json({
         message: "Failed to upload image to storage",
-        error: uploaded.error.message,
       });
     }
 

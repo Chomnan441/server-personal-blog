@@ -40,8 +40,8 @@ try {
   if (!process.env.SUPABASE_URL) {
     throw new Error("SUPABASE_URL is missing");
   }
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY && !process.env.SUPABASE_ANON_KEY) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY (or ANON_KEY) is missing");
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("SUPABASE_SERVICE_ROLE_KEY is required for avatar migration");
   }
 
   const result = await pool.query(
