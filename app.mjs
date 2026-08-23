@@ -10,6 +10,7 @@ import protectUser from "./middlewares/protectUser.mjs";
 import protectAdmin from "./middlewares/protectAdmin.mjs";
 import { ensureNotificationsTable } from "./utils/notifications.mjs";
 import { ensureSiteSettingsTable } from "./utils/siteSettings.mjs";
+import { handleUploadError } from "./utils/upload.mjs";
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -117,6 +118,8 @@ app.get("/admin-only", protectAdmin, (req, res) => {
     admin: req.user,
   });
 });
+
+app.use(handleUploadError);
 
 async function bootstrapTables() {
   try {

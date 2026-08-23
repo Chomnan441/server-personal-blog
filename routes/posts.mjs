@@ -1,9 +1,9 @@
 import { Router } from "express";
-import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import pool from "../utils/db.mjs";
 import protectAdmin from "../middlewares/protectAdmin.mjs";
 import protectUser from "../middlewares/protectUser.mjs";
+import { createPostImageUpload } from "../utils/upload.mjs";
 import { notifyAdmins } from "../utils/notifications.mjs";
 
 const postsRouter = Router();
@@ -21,9 +21,7 @@ const supabaseAuth = createClient(
   process.env.SUPABASE_ANON_KEY,
 );
 
-const multerStorage = multer.memoryStorage();
-const upload = multer({ storage: multerStorage });
-const imageFileUpload = upload.fields([{ name: "imageFile", maxCount: 1 }]);
+const postImageUpload = createPostImageUpload();
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -727,7 +725,7 @@ async function updatePost(req, res) {
 }
 
 // PUT /posts/:postId — เฉพาะ admin (มี token + role admin)
-postsRouter.put("/:postId", imageFileUpload, protectAdmin, updatePost);
+postsRouter.put("/:postId", protectAdmin, postImageUpload, updatePost);
 
 // DELETE /posts/:postId — เฉพาะ admin
 postsRouter.delete("/:postId", protectAdmin, async (req, res) => {
@@ -819,6 +817,6 @@ async function createPostWithUpload(req, res) {
 }
 
 // POST /posts — รับ multipart (imageFile) อัปโหลดไป Supabase Storage แล้วบันทึกโพสต์
-postsRouter.post("/", imageFileUpload, protectAdmin, createPostWithUpload);
+postsRouter.post("/", protectAdmin, postImageUpload, createPostWithUpload);
 
 export default postsRouter;

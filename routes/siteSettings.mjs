@@ -1,7 +1,7 @@
 import { Router } from "express";
-import multer from "multer";
 import pool from "../utils/db.mjs";
 import protectAdmin from "../middlewares/protectAdmin.mjs";
+import { createHeroImageUpload } from "../utils/upload.mjs";
 import {
   deleteImageFromStorage,
   uploadImageToStorage,
@@ -13,11 +13,7 @@ import {
 
 const siteSettingsRouter = Router();
 
-const upload = multer({ storage: multer.memoryStorage() });
-const heroImageUpload = upload.fields([
-  { name: "heroImageFile", maxCount: 1 },
-  { name: "heroImageHoverFile", maxCount: 1 },
-]);
+const heroImageUpload = createHeroImageUpload();
 
 // GET /site-settings — สาธารณะ (หน้า Hero)
 siteSettingsRouter.get("/", async (_req, res) => {

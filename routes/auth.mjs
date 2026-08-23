@@ -1,7 +1,8 @@
 import { Router } from "express";
-import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import connectionPool from "../utils/db.mjs";
+import protectUser from "../middlewares/protectUser.mjs";
+import { createProfilePicUpload } from "../utils/upload.mjs";
 import {
   deleteImageFromStorage,
   uploadImageToStorage,
@@ -15,10 +16,7 @@ const supabase = createClient(
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const authRouter = Router();
-const upload = multer({ storage: multer.memoryStorage() });
-const profilePicUpload = upload.fields([
-  { name: "profilePicFile", maxCount: 1 },
-]);
+const profilePicUpload = createProfilePicUpload();
 
 // POST /auth/register — สมัครสมาชิกผ่าน Supabase Auth + บันทึกโปรไฟล์ลงตาราง users
 authRouter.post("/register", async (req, res) => {
@@ -325,13 +323,8 @@ authRouter.put("/reset-password", async (req, res) => {
 });
 
 // PUT /auth/profile — แก้ชื่อ / username / bio + อัปโหลดรูป (multipart)
-authRouter.put("/profile", profilePicUpload, async (req, res) => {
-  const token = req.headers.authorization?.split(" ")[1];
+authRouter.put("/profile", protectUser, profilePicUpload, async (req, res) => {
   const { name, username, bio } = req.body;
-
-  if (!token) {
-    return res.status(401).json({ error: "Unauthorized: Token missing" });
-  }
 
   const trimmedName = typeof name === "string" ? name.trim() : "";
   const trimmedUsername = typeof username === "string" ? username.trim() : "";
@@ -350,13 +343,7 @@ authRouter.put("/profile", profilePicUpload, async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabase.auth.getUser(token);
-
-    if (error || !data.user) {
-      return res.status(401).json({ error: "Unauthorized or token expired" });
-    }
-
-    const userId = data.user.id;
+    const userId = req.user.id;
 
     const taken = await connectionPool.query(
       `SELECT id FROM users WHERE username = $1 AND id <> $2`,
@@ -413,8 +400,8 @@ authRouter.put("/profile", profilePicUpload, async (req, res) => {
     return res.status(200).json({
       message: "Profile updated successfully",
       user: {
-        id: data.user.id,
-        email: data.user.email,
+        id: req.user.id,
+        email: req.user.email,
         username: user.username,
         name: user.name,
         role: user.role,
