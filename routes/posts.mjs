@@ -9,6 +9,7 @@ import {
   uploadImageToStorage,
 } from "../utils/storage.mjs";
 import { notifyAdmins } from "../utils/notifications.mjs";
+import { respondServerError } from "../utils/apiError.mjs";
 
 const postsRouter = Router();
 
@@ -440,10 +441,10 @@ postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
       image: profile.profile_pic,
     });
   } catch (error) {
-    console.error("Error creating comment:", error.message);
-    return res.status(500).json({
-      message: "Server could not create comment",
-      error: error.message,
+    return respondServerError(res, {
+      logLabel: "Error creating comment",
+      error,
+      body: { message: "Server could not create comment" },
     });
   }
 });
