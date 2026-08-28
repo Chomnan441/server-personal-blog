@@ -450,45 +450,61 @@ postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
 
 // POST /posts/:postId/likes — กดไลค์ / ยกเลิกไลค์ (ต้องล็อกอิน)
 postsRouter.post("/:postId/likes", protectUser, async (req, res) => {
-  try {
-    const { postId } = req.params;
-    const userId = req.user.id;
+  const { postId } = req.params;
+  const userId = req.user.id;
+  const client = await pool.connect();
 
-    const postExists = await pool.query(
-      `SELECT id, likes_count FROM posts WHERE id = $1`,
+  try {
+    await client.query("BEGIN");
+
+    const postExists = await client.query(
+      `SELECT id FROM posts WHERE id = $1 FOR UPDATE`,
       [postId],
     );
 
     if (postExists.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({
         message: "Server could not find a requested post",
       });
     }
 
-    const existing = await pool.query(
+    const existing = await client.query(
       `SELECT id FROM likes WHERE post_id = $1 AND user_id = $2`,
       [postId, userId],
     );
 
     let liked;
-    let likesCount = Number(postExists.rows[0].likes_count) || 0;
 
     if (existing.rows.length > 0) {
-      // ยกเลิกไลค์
-      await pool.query(`DELETE FROM likes WHERE id = $1`, [
+      await client.query(`DELETE FROM likes WHERE id = $1`, [
         existing.rows[0].id,
       ]);
-      likesCount = Math.max(0, likesCount - 1);
       liked = false;
     } else {
-      await pool.query(
+      await client.query(
         `INSERT INTO likes (post_id, user_id, liked_at)
          VALUES ($1, $2, NOW())`,
         [postId, userId],
       );
-      likesCount += 1;
       liked = true;
+    }
 
+    const countResult = await client.query(
+      `UPDATE posts
+       SET likes_count = (
+         SELECT COUNT(*)::int FROM likes WHERE post_id = $1
+       )
+       WHERE id = $1
+       RETURNING likes_count`,
+      [postId],
+    );
+
+    await client.query("COMMIT");
+
+    const likesCount = countResult.rows[0]?.likes_count ?? 0;
+
+    if (liked) {
       try {
         await notifyAdmins({
           actorId: userId,
@@ -501,21 +517,18 @@ postsRouter.post("/:postId/likes", protectUser, async (req, res) => {
       }
     }
 
-    await pool.query(`UPDATE posts SET likes_count = $1 WHERE id = $2`, [
-      likesCount,
-      postId,
-    ]);
-
     return res.status(200).json({
       liked,
       likes_count: likesCount,
     });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Error toggling like:", error.message);
     return res.status(500).json({
       message: "Server could not update like",
-      error: error.message,
     });
+  } finally {
+    client.release();
   }
 });
 
