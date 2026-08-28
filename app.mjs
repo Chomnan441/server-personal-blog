@@ -11,6 +11,7 @@ import protectAdmin from "./middlewares/protectAdmin.mjs";
 import { ensureNotificationsTable } from "./utils/notifications.mjs";
 import { ensureSiteSettingsTable } from "./utils/siteSettings.mjs";
 import { handleUploadError } from "./utils/upload.mjs";
+import { respondServerError } from "./utils/apiError.mjs";
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -91,10 +92,10 @@ app.get("/health/db", async (_req, res) => {
       ok: result.rows[0]?.ok === 1,
     });
   } catch (error) {
-    console.error("DB health error:", error.message);
-    return res.status(500).json({
-      message: "DB connection failed",
-      error: error.message,
+    return respondServerError(res, {
+      logLabel: "DB health error",
+      error,
+      body: { message: "DB connection failed" },
     });
   }
 });

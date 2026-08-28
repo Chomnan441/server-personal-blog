@@ -2,6 +2,7 @@ import { Router } from "express";
 import pool from "../utils/db.mjs";
 import protectUser from "../middlewares/protectUser.mjs";
 import { ensureNotificationsTable } from "../utils/notifications.mjs";
+import { respondServerError } from "../utils/apiError.mjs";
 
 const notificationsRouter = Router();
 
@@ -54,10 +55,10 @@ notificationsRouter.get("/", async (req, res) => {
       notifications: result.rows,
     });
   } catch (error) {
-    console.error("Error fetching notifications:", error.message);
-    return res.status(500).json({
-      error: "Server could not read notifications",
-      message: error.message,
+    return respondServerError(res, {
+      logLabel: "Error fetching notifications",
+      error,
+      body: { error: "Server could not read notifications" },
     });
   }
 });

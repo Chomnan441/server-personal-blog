@@ -1,12 +1,9 @@
 import { Router } from "express";
 import pool from "../utils/db.mjs";
 import protectAdmin from "../middlewares/protectAdmin.mjs";
+import { respondServerError } from "../utils/apiError.mjs";
 
 const categoriesRouter = Router();
-
-function getErrorMessage(error, fallback) {
-  return error?.message || fallback;
-}
 
 // GET /categories — รายการหมวดทั้งหมด (สาธารณะ ใช้ทั้งหน้าบ้านและ admin)
 categoriesRouter.get("/", async (_req, res) => {
@@ -84,12 +81,12 @@ categoriesRouter.post("/", protectAdmin, async (req, res) => {
       category: result.rows[0],
     });
   } catch (error) {
-    console.error("Error creating category:", error.message);
-    return res.status(500).json({
-      error: getErrorMessage(
-        error,
-        "Server could not create category because database connection",
-      ),
+    return respondServerError(res, {
+      logLabel: "Error creating category",
+      error,
+      body: {
+        error: "Server could not create category because database connection",
+      },
     });
   }
 });
