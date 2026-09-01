@@ -7,7 +7,6 @@ import {
   uploadImageToStorage,
 } from "../utils/storage.mjs";
 import {
-  ensureSiteSettingsTable,
   getSiteSettings,
 } from "../utils/siteSettings.mjs";
 
@@ -33,8 +32,6 @@ siteSettingsRouter.put(
   heroImageUpload,
   async (req, res) => {
     try {
-      await ensureSiteSettingsTable();
-
       const current = await getSiteSettings();
       let nextHeroImage = current.heroImage;
       let nextHeroHover = current.heroImageHover;

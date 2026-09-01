@@ -8,8 +8,6 @@ import notificationsRouter from "./routes/notifications.mjs";
 import siteSettingsRouter from "./routes/siteSettings.mjs";
 import protectUser from "./middlewares/protectUser.mjs";
 import protectAdmin from "./middlewares/protectAdmin.mjs";
-import { ensureNotificationsTable } from "./utils/notifications.mjs";
-import { ensureSiteSettingsTable } from "./utils/siteSettings.mjs";
 import { handleUploadError } from "./utils/upload.mjs";
 import { respondServerError } from "./utils/apiError.mjs";
 
@@ -122,31 +120,10 @@ app.get("/admin-only", protectAdmin, (req, res) => {
 
 app.use(handleUploadError);
 
-async function bootstrapTables() {
-  try {
-    await ensureNotificationsTable();
-    console.log("Notifications table is ready");
-  } catch (error) {
-    console.error("Could not ensure notifications table:", error.message);
-  }
-
-  try {
-    await ensureSiteSettingsTable();
-    console.log("Site settings table is ready");
-  } catch (error) {
-    console.error("Could not ensure site_settings table:", error.message);
-  }
-}
-
 // Vercel serverless: ต้อง export app — ห้าม app.listen
 // Local: listen ตามปกติ
-if (process.env.VERCEL) {
-  bootstrapTables().catch((error) => {
-    console.error("Bootstrap failed:", error.message);
-  });
-} else {
-  app.listen(port, async () => {
-    await bootstrapTables();
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
     console.log(`Server is running at http://localhost:${port}`);
   });
 }

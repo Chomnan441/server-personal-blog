@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS site_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  hero_image TEXT,
+  hero_image_hover TEXT,
+  updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO site_settings (id)
+VALUES (1)
+ON CONFLICT (id) DO NOTHING;

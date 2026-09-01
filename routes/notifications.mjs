@@ -1,25 +1,12 @@
 import { Router } from "express";
 import pool from "../utils/db.mjs";
 import protectUser from "../middlewares/protectUser.mjs";
-import { ensureNotificationsTable } from "../utils/notifications.mjs";
 import { respondServerError } from "../utils/apiError.mjs";
 
 const notificationsRouter = Router();
 
-// ทุก route ต้องล็อกอิน + ให้แน่ใจว่ามีตาราง
+// ทุก route ต้องล็อกอิน
 notificationsRouter.use(protectUser);
-
-notificationsRouter.use(async (_req, _res, next) => {
-  try {
-    await ensureNotificationsTable();
-    next();
-  } catch (error) {
-    console.error("ensureNotificationsTable error:", error.message);
-    return _res.status(500).json({
-      error: "Could not prepare notifications table",
-    });
-  }
-});
 
 // GET /notifications — รายการแจ้งเตือนของ user ที่ล็อกอินอยู่
 notificationsRouter.get("/", async (req, res) => {
