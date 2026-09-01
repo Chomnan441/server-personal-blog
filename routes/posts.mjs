@@ -187,6 +187,7 @@ postsRouter.get("/", async (req, res) => {
     const limit = Math.max(1, Number.parseInt(req.query.limit, 10) || 6);
     const category = req.query.category;
     const keyword = req.query.keyword;
+    const status = req.query.status;
     const isAdmin = await isAdminViewer(req);
 
     const conditions = [];
@@ -198,6 +199,12 @@ postsRouter.get("/", async (req, res) => {
       conditions.push(
         `LOWER(statuses.status) IN ('publish', 'published')`,
       );
+    }
+
+    if (status === "draft") {
+      conditions.push(`LOWER(statuses.status) = 'draft'`);
+    } else if (status === "published") {
+      conditions.push(`LOWER(statuses.status) IN ('publish', 'published')`);
     }
 
     if (category) {
