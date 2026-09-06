@@ -13,18 +13,68 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY,
 );
 
+let supabaseAdmin = null;
+
+function getSupabaseAdmin() {
+  if (!supabaseAdmin) {
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!serviceRoleKey) {
+      throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
+    }
+    supabaseAdmin = createClient(process.env.SUPABASE_URL, serviceRoleKey);
+  }
+  return supabaseAdmin;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const authRouter = Router();
 const profilePicUpload = createProfilePicUpload();
 
+async function deleteAuthUser(userId) {
+  const { error } = await getSupabaseAdmin().auth.admin.deleteUser(userId);
+  if (error) {
+    throw error;
+  }
+}
+
 // POST /auth/register — สมัครสมาชิกผ่าน Supabase Auth + บันทึกโปรไฟล์ลงตาราง users
 authRouter.post("/register", async (req, res) => {
-  const { email, password, username, name } = req.body;
+  const email =
+    typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const password = typeof req.body.password === "string" ? req.body.password : "";
+  const username =
+    typeof req.body.username === "string" ? req.body.username.trim() : "";
+  const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+
+  if (!name) {
+    return res.status(400).json({ error: "Name is required" });
+  }
+  if (!username) {
+    return res.status(400).json({ error: "Username is required" });
+  }
+  if (!email) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+  if (!EMAIL_RE.test(email)) {
+    return res.status(400).json({ error: "Email must be a valid email" });
+  }
+  if (!password) {
+    return res.status(400).json({ error: "Password is required" });
+  }
+  if (password.length < 6) {
+    return res
+      .status(400)
+      .json({ error: "Password must be at least 6 characters" });
+  }
+
+  let supabaseUserId = null;
 
   try {
     const existingUser = await connectionPool.query(
-      `SELECT * FROM users WHERE username = $1`,
+      `SELECT id FROM users WHERE username = $1`,
       [username],
     );
 
@@ -64,19 +114,45 @@ authRouter.post("/register", async (req, res) => {
       });
     }
 
-    const supabaseUserId = data.user.id;
+    supabaseUserId = data.user.id;
 
-    const result = await connectionPool.query(
-      `INSERT INTO users (id, username, name, role)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [supabaseUserId, username, name, "user"],
-    );
+    try {
+      const result = await connectionPool.query(
+        `INSERT INTO users (id, username, name, role)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [supabaseUserId, username, name, "user"],
+      );
 
-    return res.status(201).json({
-      message: "User created successfully",
-      user: result.rows[0],
-    });
+      return res.status(201).json({
+        message: "User created successfully",
+        user: result.rows[0],
+      });
+    } catch (insertError) {
+      console.error("Register INSERT error:", insertError.message);
+
+      try {
+        await deleteAuthUser(supabaseUserId);
+      } catch (rollbackError) {
+        console.error(
+          "Failed to roll back Auth user after INSERT failure:",
+          rollbackError.message,
+        );
+        return res
+          .status(500)
+          .json({ error: "An error occurred during registration" });
+      }
+
+      if (insertError.code === "23505") {
+        return res
+          .status(400)
+          .json({ error: "This username is already taken" });
+      }
+
+      return res
+        .status(500)
+        .json({ error: "An error occurred during registration" });
+    }
   } catch (error) {
     console.error("Register error:", error);
     return res
