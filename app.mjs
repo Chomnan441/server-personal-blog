@@ -37,6 +37,19 @@ function isAllowedOrigin(origin) {
     return true;
   }
 
+  // Vite ขยับพอร์ตเมื่อ 5173 ถูกใช้แล้ว (5174, 5175, ...)
+  try {
+    const local = new URL(origin);
+    if (
+      local.protocol === "http:" &&
+      (local.hostname === "localhost" || local.hostname === "127.0.0.1")
+    ) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
   try {
     const { protocol, hostname } = new URL(origin);
     if (protocol !== "https:") {
