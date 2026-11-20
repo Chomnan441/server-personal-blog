@@ -28,7 +28,10 @@ function getSupabaseAdmin() {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:5173").replace(
+  /\/$/,
+  "",
+);
 
 const authRouter = Router();
 const profilePicUpload = createProfilePicUpload();
@@ -295,11 +298,8 @@ authRouter.post("/forgot-password", async (req, res) => {
 
 // POST /auth/recovery-password — ตั้งรหัสใหม่จากลิงก์ในอีเมล
 authRouter.post("/recovery-password", async (req, res) => {
-  const { accessToken, refreshToken, password } = req.body;
-
-  if (!accessToken || !refreshToken) {
-    return res.status(401).json({ error: "Recovery session is missing" });
-  }
+  const { password, tokenHash } = req.body;
+  let { accessToken, refreshToken } = req.body;
 
   if (!password || typeof password !== "string") {
     return res.status(400).json({ error: "Password is required" });
@@ -312,6 +312,26 @@ authRouter.post("/recovery-password", async (req, res) => {
   }
 
   try {
+    if (typeof tokenHash === "string" && tokenHash) {
+      const { data, error } = await supabase.auth.verifyOtp({
+        type: "recovery",
+        token_hash: tokenHash,
+      });
+
+      if (error || !data.session) {
+        return res.status(400).json({
+          error: error?.message || "Recovery session is missing",
+        });
+      }
+
+      accessToken = data.session.access_token;
+      refreshToken = data.session.refresh_token;
+    }
+
+    if (!accessToken || !refreshToken) {
+      return res.status(400).json({ error: "Recovery session is missing" });
+    }
+
     const userClient = createClient(
       process.env.SUPABASE_URL,
       process.env.SUPABASE_ANON_KEY,
