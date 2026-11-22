@@ -457,67 +457,83 @@ postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
 });
 
 // POST /posts/:postId/likes — กดไลค์ / ยกเลิกไลค์ (ต้องล็อกอิน)
+// ใช้คำสั่งเดียว ไม่เปิด transaction ค้าง connection
+// เพราะบน Vercel + Supabase pooler การ connect()/BEGIN มักล้มเหลวจนไลค์ไม่ติด
 postsRouter.post("/:postId/likes", protectUser, async (req, res) => {
-  const { postId } = req.params;
+  const postId = Number(req.params.postId);
   const userId = req.user.id;
-  const client = await pool.connect();
+
+  if (!Number.isInteger(postId)) {
+    return res.status(400).json({ message: "Invalid post id" });
+  }
 
   try {
-    await client.query("BEGIN");
-
-    const postExists = await client.query(
-      `SELECT id FROM posts WHERE id = $1 FOR UPDATE`,
-      [postId],
-    );
+    const postExists = await pool.query(`SELECT id FROM posts WHERE id = $1`, [
+      postId,
+    ]);
 
     if (postExists.rows.length === 0) {
-      await client.query("ROLLBACK");
       return res.status(404).json({
         message: "Server could not find a requested post",
       });
     }
 
-    const existing = await client.query(
-      `SELECT id FROM likes WHERE post_id = $1 AND user_id = $2`,
+    const userExists = await pool.query(`SELECT id FROM users WHERE id = $1`, [
+      userId,
+    ]);
+
+    if (userExists.rows.length === 0) {
+      return res.status(404).json({
+        message: "User profile not found. Please complete registration.",
+      });
+    }
+
+    const result = await pool.query(
+      `WITH existing AS (
+         SELECT id FROM likes WHERE post_id = $1 AND user_id = $2
+       ),
+       deleted AS (
+         DELETE FROM likes
+         WHERE id IN (SELECT id FROM existing)
+         RETURNING id
+       ),
+       inserted AS (
+         INSERT INTO likes (post_id, user_id, liked_at)
+         SELECT $1, $2, NOW()
+         WHERE NOT EXISTS (SELECT 1 FROM existing)
+         ON CONFLICT (post_id, user_id) DO NOTHING
+         RETURNING id
+       ),
+       delta AS (
+         SELECT CASE
+           WHEN EXISTS (SELECT 1 FROM deleted) THEN -1
+           WHEN EXISTS (SELECT 1 FROM inserted) THEN 1
+           ELSE 0
+         END AS amount
+       ),
+       updated AS (
+         UPDATE posts
+         SET likes_count = GREATEST(likes_count + (SELECT amount FROM delta), 0)
+         WHERE id = $1
+         RETURNING likes_count
+       )
+       SELECT
+         likes_count,
+         EXISTS (SELECT 1 FROM inserted) AS liked
+       FROM updated`,
       [postId, userId],
     );
 
-    let liked;
-
-    if (existing.rows.length > 0) {
-      await client.query(`DELETE FROM likes WHERE id = $1`, [
-        existing.rows[0].id,
-      ]);
-      liked = false;
-    } else {
-      await client.query(
-        `INSERT INTO likes (post_id, user_id, liked_at)
-         VALUES ($1, $2, NOW())`,
-        [postId, userId],
-      );
-      liked = true;
-    }
-
-    const countResult = await client.query(
-      `UPDATE posts
-       SET likes_count = (
-         SELECT COUNT(*)::int FROM likes WHERE post_id = $1
-       )
-       WHERE id = $1
-       RETURNING likes_count`,
-      [postId],
-    );
-
-    await client.query("COMMIT");
-
-    const likesCount = countResult.rows[0]?.likes_count ?? 0;
+    const row = result.rows[0];
+    const liked = Boolean(row?.liked);
+    const likesCount = row?.likes_count ?? 0;
 
     if (liked) {
       try {
         await notifyAdmins({
           actorId: userId,
           type: "like",
-          postId: Number(postId),
+          postId,
           message: "liked your article",
         });
       } catch (notifyError) {
@@ -530,13 +546,10 @@ postsRouter.post("/:postId/likes", protectUser, async (req, res) => {
       likes_count: likesCount,
     });
   } catch (error) {
-    await client.query("ROLLBACK");
     console.error("Error toggling like:", error.message);
     return res.status(500).json({
       message: "Server could not update like",
     });
-  } finally {
-    client.release();
   }
 });
 
