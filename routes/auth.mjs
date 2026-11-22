@@ -382,8 +382,14 @@ authRouter.put("/reset-password", async (req, res) => {
       return res.status(401).json({ error: "Unauthorized or token expired" });
     }
 
-    // ยืนยันรหัสเก่าด้วยการ login อีกรอบ
-    const { error: loginError } = await supabase.auth.signInWithPassword({
+    // ยืนยันรหัสเก่าบน client แยก — signIn จะตั้ง session ให้ updateUser ใช้
+    // แค่ Bearer header ไม่พอ Supabase จะตอบ Auth session missing
+    const userClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY,
+    );
+
+    const { error: loginError } = await userClient.auth.signInWithPassword({
       email: data.user.email,
       password: oldPassword,
     });
@@ -391,17 +397,6 @@ authRouter.put("/reset-password", async (req, res) => {
     if (loginError) {
       return res.status(400).json({ error: "Invalid old password" });
     }
-
-    // อัปเดตรหัสด้วย client ที่ผูก token ของ user คนนี้
-    const userClient = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY,
-      {
-        global: {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      },
-    );
 
     const { error: updateError } = await userClient.auth.updateUser({
       password: newPassword,
